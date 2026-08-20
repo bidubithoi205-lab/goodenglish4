@@ -1,0 +1,30 @@
+import express from 'express';
+import multer from 'multer';
+import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+dotenv.config();
+const app = express(), upload = multer({ storage: multer.memoryStorage(), limits:{fileSize: 12 * 1024 * 1024} });
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+app.use(express.json({limit:'2mb'})); app.use(express.static(__dirname));
+const configured = () => Boolean(process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY);
+const bandPrompt = `You are a strict but encouraging IELTS examiner. Return ONLY valid JSON: {"overallBand": number, "criterion": {"taskResponse":number,"coherence":number,"lexical":number,"grammar":number}, "summary":"string", "corrections":[{"original":"string","improved":"string","reason":"string"}], "nextSteps":["string","string","string"]}. Grade the submitted writing with IELTS Writing Task 2 criteria. Be concise; do not invent mistakes.`;
+async function gemini(prompt){
+ const model=process.env.GEMINI_MODEL || 'gemini-3.1-flash-preview';
+ const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',temperature:.25}})});
+ if(!r.ok) throw new Error(`Gemini API error ${r.status}`); const d=await r.json(); return d.candidates?.[0]?.content?.parts?.[0]?.text;
+}
+async function openai(prompt){
+ const r=await fetch('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${process.env.OPENAI_API_KEY}`},body:JSON.stringify({model:process.env.OPENAI_MODEL||'gpt-4o',response_format:{type:'json_object'},messages:[{role:'system',content:'Return only the requested JSON.'},{role:'user',content:prompt}]})});
+ if(!r.ok) throw new Error(`OpenAI API error ${r.status}`); const d=await r.json(); return d.choices[0].message.content;
+}
+function demoWriting(text){return {demo:true,overallBand:6.0,criterion:{taskResponse:6,coherence:6,lexical:6,grammar:5.5},summary:`Bài viết ${text.length>180?'đã có phát triển ý tương đối rõ':'còn ngắn; hãy phát triển luận điểm bằng giải thích và ví dụ'}. Đây là kết quả minh hoạ; thêm API key để nhận chấm thực tế.`,corrections:[{original:'people is',improved:'people are',reason:'“People” là danh từ số nhiều.'},{original:'very good for society',improved:'highly beneficial to society',reason:'Dùng collocation học thuật chính xác hơn.'}],nextSteps:['Viết câu chủ đề rõ quan điểm cho mỗi đoạn thân bài.','Thêm một ví dụ cụ thể sau mỗi luận điểm.','Kiểm tra subject–verb agreement trước khi nộp.']};}
+app.post('/api/writing/assess',async(req,res)=>{const {text,question='IELTS Writing Task 2'}=req.body;if(!text?.trim()) return res.status(400).json({error:'Vui lòng nhập bài viết.'}); if(!configured()) return res.json(demoWriting(text));try{const raw=process.env.GEMINI_API_KEY?await gemini(`${bandPrompt}\nQuestion: ${question}\nEssay:\n${text}`):await openai(`${bandPrompt}\nQuestion: ${question}\nEssay:\n${text}`);res.json(JSON.parse(raw.replace(/```json|```/g,'')));}catch(e){res.status(502).json({error:'Không thể gọi AI chấm bài. Kiểm tra API key/model.',detail:e.message});}});
+app.post('/api/practice/generate',async(req,res)=>{const {skill='reading',level='B1',topic='daily life'}=req.body;const prompt=`Create one IELTS ${skill} practice item for level ${level}, topic ${topic}. Return ONLY JSON: {"title":"string","instruction":"string","content":"string","questions":[{"question":"string","options":["string","string","string","string"],"answer":0,"explanation":"string"}]}. Create exactly 3 questions.`;if(!configured()) return res.json({demo:true,title:`${skill[0].toUpperCase()+skill.slice(1)} · ${topic}`,instruction:'Đọc nội dung và chọn đáp án đúng.',content:'Urban areas are attracting more residents because they offer access to employment, education and healthcare. However, this growth also puts pressure on housing and transport systems.',questions:[{question:'What is the main idea of the text?',options:['Cities are becoming smaller.','Urban growth brings opportunities and pressure.','Healthcare is not important.','Transport has disappeared.'],answer:1,explanation:'Đoạn văn nêu cả lợi ích và áp lực của đô thị hoá.'},{question:'Which benefit is mentioned?',options:['Free housing','Employment access','Less traffic','Cheaper food'],answer:1,explanation:'Employment được liệt kê trực tiếp.'},{question:'What is under pressure?',options:['Housing and transport','Schools only','Rural farms','Weather'],answer:0,explanation:'Câu cuối nói housing and transport systems.'}]});try{const raw=process.env.GEMINI_API_KEY?await gemini(prompt):await openai(prompt);res.json(JSON.parse(raw.replace(/```json|```/g,'')));}catch(e){res.status(502).json({error:'Không thể tạo bài tập.',detail:e.message});}});
+app.post('/api/speaking/assess',upload.single('audio'),async(req,res)=>{if(!req.file) return res.status(400).json({error:'Vui lòng thu âm câu trả lời trước.'});if(!process.env.AZURE_SPEECH_KEY) return res.json({demo:true,transcript:'I believe technology makes education more accessible for students.',scores:{pronunciation:78,fluency:72,accuracy:75},feedback:['Phát âm rõ từ “technology” và “accessible”.','Nối âm giữa “makes education” để câu tự nhiên hơn.','Giảm ngắt nghỉ trước “for students”.'],tip:'Thu âm lại với tốc độ chậm hơn 5% và nhấn trọng âm trong ac-CES-si-ble.'});
+ // Azure Pronunciation Assessment should be called here with a WAV (16 kHz mono) buffer.
+ // The browser demo uses WebM; in production transcode to WAV server-side or use Azure Speech SDK in the client.
+ return res.status(501).json({error:'Azure Speech đã được cấu hình, nhưng bản demo cần bộ chuyển WebM → WAV trước khi gửi chấm phát âm.',hint:'Dùng Azure Speech SDK hoặc ffmpeg server-side rồi gọi Pronunciation Assessment API.'});
+});
+app.listen(process.env.PORT||3000,'0.0.0.0',()=>console.log(`GE is running on http://0.0.0.0:${process.env.PORT||3000}`));
